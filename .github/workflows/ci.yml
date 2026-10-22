@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Lint & test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Ruff
+        run: ruff check app tests
+
+      - name: Pytest
+        run: python -m pytest tests -q
+
+  docker-build:
+    name: Docker build (non-root, health-checked)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t kitsunecart:ci .
+
+      - name: Assert no compiler in the runtime image
+        run: |
+          if docker run --rm --entrypoint sh kitsunecart:ci -c "command -v gcc"; then
+            echo "ERROR: gcc present in the runtime image"; exit 1
+          fi
+
+      - name: Verify non-root user and health probe
+        run: |
+          docker run -d --name probe -p 8000:8000 kitsunecart:ci
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/health || true)
+            if [ "$code" = "200" ]; then
+              echo "health OK, container user: $(docker exec probe whoami)"
+              docker rm -f probe
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs probe
+          docker rm -f probe
+          exit 1
